@@ -17,7 +17,7 @@ env:
   DEFCONFIG: camellia_defconfig          # 需要确认
   ARCH: arm64
   CLANG_PREBUILT_URL: https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86
-  CLANG_VERSION: clang-r416183b                # 需要确认
+  CLANG_VERSION: clang-r522817                # 需要确认
   DRIVER_DIR: codex                      # 驱动源码目录
 
 jobs:
@@ -43,7 +43,7 @@ jobs:
         run: |
           mkdir -p ~/toolchains
           cd ~/toolchains
-          git clone --depth=1 ${CLANG_PREBUILT_URL} -b ${CLANG_VERSION} ${CLANG_VERSION}
+          git clone --depth=1 ${CLANG_PREBUILT_URL} -b ${CLANG_VERSION}
 
       # 4. 配置 PATH
       - name: Set up PATH
