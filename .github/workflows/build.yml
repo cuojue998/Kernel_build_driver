@@ -14,7 +14,6 @@ jobs:
     steps:
     - name: Checkout 你的仓库（包含codex文件夹）
       uses: actions/checkout@v4
-      # 不设置path，直接checkout到当前目录
 
     - name: 克隆小米内核源码
       run: |
@@ -45,7 +44,6 @@ jobs:
     - name: 配置内核
       working-directory: ./kernel
       run: |
-        # 尝试使用小米默认配置
         if [ -f arch/arm64/configs/camellia_defconfig ]; then
           make ARCH=arm64 CC=clang CLANG_TRIPLE=aarch64-linux-gnu- \
             CROSS_COMPILE=aarch64-linux-gnu- camellia_defconfig
@@ -53,8 +51,6 @@ jobs:
           make ARCH=arm64 CC=clang CLANG_TRIPLE=aarch64-linux-gnu- \
             CROSS_COMPILE=aarch64-linux-gnu- defconfig
         fi
-        
-        # 启用模块支持
         scripts/config --enable CONFIG_MODULES
         scripts/config --enable CONFIG_MODULE_UNLOAD
         scripts/config --enable CONFIG_KALLSYMS
@@ -63,24 +59,20 @@ jobs:
     - name: 准备内核模块构建环境
       working-directory: ./kernel
       run: |
-        # 只准备模块编译所需文件，不编译完整内核
         make -j$(nproc) ARCH=arm64 CC=clang \
           CLANG_TRIPLE=aarch64-linux-gnu- \
           CROSS_COMPILE=aarch64-linux-gnu- \
           LD=ld.lld AR=llvm-ar NM=llvm-nm \
           STRIP=llvm-strip OBJCOPY=llvm-objcopy \
           modules_prepare
-        
-        # 编译内核镜像（模块编译可能需要）
         make -j$(nproc) ARCH=arm64 CC=clang \
           CLANG_TRIPLE=aarch64-linux-gnu- \
           CROSS_COMPILE=aarch64-linux-gnu- \
           Image
 
     - name: 编译codex驱动模块
-      working-directory: ./codex  # 直接使用codex目录
+      working-directory: ./codex
       run: |
-        # 设置内核源码路径
         export KERNELDIR=$(pwd)/../kernel
         export ARCH=arm64
         export CC=clang
@@ -91,25 +83,21 @@ jobs:
         export NM=llvm-nm
         export STRIP=llvm-strip
         
-        # 如果没有Makefile，自动生成一个
         if [ ! -f Makefile ]; then
-          # 查找源文件
           SOURCES=$(ls *.c 2>/dev/null)
           if [ -z "$SOURCES" ]; then
             echo "错误: 找不到任何.c源文件"
             exit 1
           fi
           
-          # 提取模块名（去掉.c后缀）
           MODULE_NAME=$(echo $SOURCES | awk '{print $1}' | sed 's/\.c$//')
           
-          # 构建模块对象列表
           OBJS_LIST=""
           for src in $SOURCES; do
             OBJS_LIST="$OBJS_LIST $(basename $src .c).o"
           done
           
-          cat > Makefile <<'EOF'
+          cat > Makefile << "EOF"
 obj-m := MODULE_NAME_PLACEHOLDER.o
 MODULE_NAME_PLACEHOLDER-objs := OBJS_LIST_PLACEHOLDER
 
@@ -124,25 +112,18 @@ default:
 clean:
 	$(MAKE) -C $(KERNELDIR) M=$(PWD) clean
 EOF
-          # 替换占位符
           sed -i "s/MODULE_NAME_PLACEHOLDER/$MODULE_NAME/g" Makefile
           sed -i "s/OBJS_LIST_PLACEHOLDER/$OBJS_LIST/g" Makefile
-          
-          echo "生成的Makefile内容："
-          cat Makefile
         fi
         
-        # 执行编译
         make -j$(nproc) KERNELDIR=$KERNELDIR \
           ARCH=$ARCH CC=$CC CLANG_TRIPLE=$CLANG_TRIPLE \
           CROSS_COMPILE=$CROSS_COMPILE LD=$LD AR=$AR \
           NM=$NM STRIP=$STRIP
         
-        # 显示编译结果
         echo "=== 编译完成的KO文件 ==="
         ls -lh *.ko 2>/dev/null || echo "未找到KO文件"
         
-        # 检查模块信息
         if ls *.ko 1>/dev/null 2>&1; then
           for ko in *.ko; do
             echo "--- $ko 信息 ---"
@@ -154,7 +135,7 @@ EOF
       uses: actions/upload-artifact@v4
       with:
         name: xiaomi-kernel-module
-        path: codex/*.ko  # 修正路径
+        path: codex/*.ko
         if-no-files-found: error
 
     - name: 上传编译日志
