@@ -1,12 +1,12 @@
 name: Build Kernel Module (Clang)
 
 on:
-  workflow_dispatch:
-  push:
+  workflow_dispatch:          # 手动触发
+  push:                       # 推送触发
     branches: [ main, master ]
     paths:
-      - 'codex/**'
-  pull_request:
+      - 'codex/**'            # 只在驱动源码变更时触发
+  pull_request:               # PR 触发
     branches: [ main, master ]
     paths:
       - 'codex/**'
@@ -14,20 +14,22 @@ on:
 env:
   KERNEL_REPO: https://github.com/MiCode/Xiaomi_Kernel_OpenSource.git
   KERNEL_BRANCH: camellia-r-oss
-  DEFCONFIG: camellia_defconfig
+  DEFCONFIG: camellia_defconfig          # 需确认实际文件名
   ARCH: arm64
   CLANG_PREBUILT_URL: https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86
-  CLANG_VERSION: llvm-r522817
-  DRIVER_DIR: codex
+  CLANG_VERSION: llvm-r522817            # 已确认的分支名
+  DRIVER_DIR: codex                      # 驱动源码目录
 
 jobs:
   build-kernel-module:
     runs-on: ubuntu-22.04
 
     steps:
+      # 1. 检出驱动仓库
       - name: Checkout driver repo
         uses: actions/checkout@v4
 
+      # 2. 安装构建依赖（增加了 lld 作为备用）
       - name: Install build dependencies
         run: |
           sudo apt-get update
@@ -36,46 +38,69 @@ jobs:
             libssl-dev libelf-dev \
             libncurses-dev python3
 
-      # 修正1：仓库克隆后的目录名就是“版本号”，不加“clang-”前缀
+      # 3. 下载 Clang 预编译工具链
       - name: Download AOSP Clang toolchain
         run: |
           mkdir -p ~/toolchains
           cd ~/toolchains
-          # 这里 -b 后跟的是完整分支名，如 clang-r522817
-          # 克隆下来的文件夹名就是 clang-r522817（没有多余的 clang- 前缀）
           git clone --depth=1 ${CLANG_PREBUILT_URL} -b ${CLANG_VERSION}
+          echo "CLANG_DIR=${HOME}/toolchains/${CLANG_VERSION}" >> $GITHUB_ENV
 
-      # 修正2：PATH 和 CLANG_PATH 必须指向实际的目录名
-      - name: Set up PATH
+      # 4. 设置工具链路径（仅记录，不依赖 PATH）
+      - name: Set toolchain paths
         run: |
-          # 实际克隆下来的目录名就是 ${CLANG_VERSION}，例如 clang-r522817
-          CLANG_PATH="${HOME}/toolchains/${CLANG_VERSION}/bin"
-          echo "${CLANG_PATH}" >> $GITHUB_PATH
-          echo "CLANG_PATH=${CLANG_PATH}" >> $GITHUB_ENV
+          echo "CLANG=${CLANG_DIR}/bin/clang" >> $GITHUB_ENV
+          echo "LD_LLD=${CLANG_DIR}/bin/ld.lld" >> $GITHUB_ENV
+          echo "LLVM_AR=${CLANG_DIR}/bin/llvm-ar" >> $GITHUB_ENV
+          echo "LLVM_NM=${CLANG_DIR}/bin/llvm-nm" >> $GITHUB_ENV
+          echo "LLVM_STRIP=${CLANG_DIR}/bin/llvm-strip" >> $GITHUB_ENV
+          echo "LLVM_OBJCOPY=${CLANG_DIR}/bin/llvm-objcopy" >> $GITHUB_ENV
 
-      - name: Verify Clang toolchain
+      # 5. 验证 AOSP Clang 工具链（使用绝对路径）
+      - name: Verify AOSP Clang toolchain
         run: |
-          which clang
-          clang --version
-          which ld.lld
-          ld.lld --version
+          echo "=== Checking Clang ==="
+          ${CLANG} --version
+          echo ""
+          echo "=== Checking LLD ==="
+          ${LD_LLD} --version
+          echo ""
+          echo "=== Checking cross-compile support ==="
+          ${CLANG} -print-targets | grep aarch64 || echo "WARNING: aarch64 target not found!"
 
+      # 6. 克隆内核源码
       - name: Clone kernel source
         run: |
           git clone --depth=1 ${KERNEL_REPO} -b ${KERNEL_BRANCH} kernel
           echo "KERNEL_DIR=${GITHUB_WORKSPACE}/kernel" >> $GITHUB_ENV
 
+      # 7. 配置内核
       - name: Configure kernel
         working-directory: kernel
         run: |
-          make O=out ARCH=${ARCH} ${DEFCONFIG}
+          # 尝试多个可能的 defconfig 名称
+          if [ -f arch/${ARCH}/configs/${DEFCONFIG} ]; then
+            echo "Using defconfig: ${DEFCONFIG}"
+            make O=out ARCH=${ARCH} ${DEFCONFIG}
+          else
+            echo "ERROR: Defconfig '${DEFCONFIG}' not found!"
+            echo "Available defconfigs:"
+            ls arch/${ARCH}/configs/ | grep -i camellia || ls arch/${ARCH}/configs/
+            exit 1
+          fi
 
+      # 8. 准备模块编译需要的头文件（使用绝对路径）
       - name: Prepare kernel headers
         working-directory: kernel
         run: |
-          make O=out ARCH=${ARCH} modules_prepare
+          make O=out ARCH=${ARCH} \
+            CC=${CLANG} \
+            LD=${LD_LLD} \
+            LLVM=1 \
+            LLVM_IAS=1 \
+            modules_prepare
 
-      # 修正3：编译阶段必须添加 LLVM 工具链参数以避免链接器不匹配
+      # 9. 编译内核模块（全部使用绝对路径）
       - name: Build kernel module
         working-directory: ${GITHUB_WORKSPACE}
         run: |
@@ -83,8 +108,12 @@ jobs:
             -C ${KERNEL_DIR} \
             M=${GITHUB_WORKSPACE}/${DRIVER_DIR} \
             ARCH=${ARCH} \
-            CC=clang \
-            LD=ld.lld \
+            CC=${CLANG} \
+            LD=${LD_LLD} \
+            AR=${LLVM_AR} \
+            NM=${LLVM_NM} \
+            STRIP=${LLVM_STRIP} \
+            OBJCOPY=${LLVM_OBJCOPY} \
             LLVM=1 \
             LLVM_IAS=1 \
             CLANG_TRIPLE=aarch64-linux-gnu- \
@@ -92,13 +121,21 @@ jobs:
             O=${KERNEL_DIR}/out \
             modules
 
+      # 10. 验证生成的 .ko 文件
       - name: Verify .ko output
         run: |
           echo "=== Checking for .ko files ==="
-          find ${GITHUB_WORKSPACE}/${DRIVER_DIR} -name "*.ko" -type f
+          KO_FILES=$(find ${GITHUB_WORKSPACE}/${DRIVER_DIR} -name "*.ko" -type f)
+          if [ -z "$KO_FILES" ]; then
+            echo "ERROR: No .ko files found!"
+            exit 1
+          fi
+          echo "$KO_FILES"
+          echo ""
           echo "=== Module info ==="
           find ${GITHUB_WORKSPACE}/${DRIVER_DIR} -name "*.ko" -exec file {} \;
 
+      # 11. 上传驱动作为构建产物
       - name: Upload kernel module artifact
         uses: actions/upload-artifact@v4
         with:
