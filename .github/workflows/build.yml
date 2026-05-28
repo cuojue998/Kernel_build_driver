@@ -1,24 +1,44 @@
 name: Build Kernel Module (Clang)
 
 on:
-  workflow_dispatch:          # 手动触发
-  push:                       # 推送触发
+  workflow_dispatch:          # 手动触发，可自定义参数
+    inputs:
+      clang_version:
+        description: '选择 Clang 版本 (根据 Android 版本)'
+        required: true
+        type: choice
+        options:
+          - 'clang-r383902 (Android 10/11)'
+          - 'clang-r416183b (Android 11/12)'
+          - 'clang-r450784d (Android 12/13)'
+          - 'clang-r498229b (Android 13/14)'
+          - 'clang-r530567 (Android 14/15)'
+          - 'clang-r522817 (Android 14/15 通用)'
+        default: 'clang-r416183b (Android 11/12)'
+      kernel_branch:
+        description: '内核分支名 (默认 camellia-r-oss)'
+        required: false
+        type: string
+        default: 'camellia-r-oss'
+      defconfig:
+        description: '内核配置文件名 (如 camellia_defconfig)'
+        required: false
+        type: string
+        default: 'camellia_defconfig'
+  
+  push:
     branches: [ main, master ]
     paths:
-      - 'codex/**'            # 只在驱动源码变更时触发
-  pull_request:               # PR 触发
+      - 'codex/**'
+  pull_request:
     branches: [ main, master ]
     paths:
       - 'codex/**'
 
 env:
   KERNEL_REPO: https://github.com/MiCode/Xiaomi_Kernel_OpenSource.git
-  KERNEL_BRANCH: camellia-r-oss
-  DEFCONFIG: camellia_defconfig          # 需确认实际文件名
   ARCH: arm64
-  CLANG_PREBUILT_URL: https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/clang-r530567.tar.gz
-  CLANG_VERSION: clang-r530567
-  DRIVER_DIR: codex                      # 驱动源码目录
+  DRIVER_DIR: codex
 
 jobs:
   build-kernel-module:
@@ -29,7 +49,33 @@ jobs:
       - name: Checkout driver repo
         uses: actions/checkout@v4
 
-      # 2. 安装构建依赖
+      # 2. 设置 Clang 版本和参数
+      - name: Set Clang version from input
+        run: |
+          # 如果通过 workflow_dispatch 触发，使用输入的版本
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            CLANG_FULL="${{ github.event.inputs.clang_version }}"
+            KERNEL_BRANCH="${{ github.event.inputs.kernel_branch }}"
+            DEFCONFIG="${{ github.event.inputs.defconfig }}"
+          else
+            # 自动触发时使用默认值
+            CLANG_FULL="clang-r416183b (Android 11/12)"
+            KERNEL_BRANCH="camellia-r-oss"
+            DEFCONFIG="camellia_defconfig"
+          fi
+          
+          # 提取纯版本号（去掉括号内的说明）
+          CLANG_VERSION=$(echo "$CLANG_FULL" | awk '{print $1}')
+          
+          echo "Selected Clang version: ${CLANG_VERSION}"
+          echo "Kernel branch: ${KERNEL_BRANCH}"
+          echo "Defconfig: ${DEFCONFIG}"
+          
+          echo "CLANG_VERSION=${CLANG_VERSION}" >> $GITHUB_ENV
+          echo "KERNEL_BRANCH=${KERNEL_BRANCH}" >> $GITHUB_ENV
+          echo "DEFCONFIG=${DEFCONFIG}" >> $GITHUB_ENV
+
+      # 3. 安装构建依赖
       - name: Install build dependencies
         run: |
           sudo apt-get update
@@ -38,18 +84,39 @@ jobs:
             libssl-dev libelf-dev \
             libncurses-dev python3 wget
 
-      # 3. 下载并解压 Clang 预编译工具链
-      - name: Download and extract AOSP Clang
+      # 4. 下载 Clang 预编译工具链
+      - name: Download AOSP Clang toolchain
         run: |
           mkdir -p ~/toolchains
           cd ~/toolchains
-          wget -q "${CLANG_PREBUILT_URL}" -O ${CLANG_VERSION}.tar.gz
-          mkdir -p ${CLANG_VERSION}
-          tar -xzf ${CLANG_VERSION}.tar.gz -C ${CLANG_VERSION}
-          rm ${CLANG_VERSION}.tar.gz
+          
+          # 根据版本选择下载方式
+          case "${CLANG_VERSION}" in
+            clang-r383902|clang-r416183b|clang-r450784d)
+              # 旧版本只能用 git clone
+              echo "Downloading old Clang via git..."
+              git clone --depth=1 https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86 -b ${CLANG_VERSION}
+              ;;
+            *)
+              # 新版本尝试用 wget 下载 tar.gz
+              echo "Downloading new Clang via wget..."
+              CLANG_URL="https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/${CLANG_VERSION}.tar.gz"
+              if wget -q --spider "$CLANG_URL" 2>/dev/null; then
+                wget -q "$CLANG_URL" -O ${CLANG_VERSION}.tar.gz
+                mkdir -p ${CLANG_VERSION}
+                tar -xzf ${CLANG_VERSION}.tar.gz -C ${CLANG_VERSION}
+                rm ${CLANG_VERSION}.tar.gz
+              else
+                # 如果 wget 失败，回退到 git clone
+                echo "wget failed, falling back to git clone..."
+                git clone --depth=1 https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86 -b ${CLANG_VERSION}
+              fi
+              ;;
+          esac
+          
           echo "CLANG_DIR=${HOME}/toolchains/${CLANG_VERSION}" >> $GITHUB_ENV
 
-      # 4. 设置工具链路径
+      # 5. 设置工具链路径
       - name: Set toolchain paths
         run: |
           echo "CLANG=${CLANG_DIR}/bin/clang" >> $GITHUB_ENV
@@ -59,25 +126,30 @@ jobs:
           echo "LLVM_STRIP=${CLANG_DIR}/bin/llvm-strip" >> $GITHUB_ENV
           echo "LLVM_OBJCOPY=${CLANG_DIR}/bin/llvm-objcopy" >> $GITHUB_ENV
 
-      # 5. 验证 Clang 工具链
+      # 6. 验证 Clang 工具链
       - name: Verify AOSP Clang toolchain
         run: |
-          echo "=== Checking Clang ==="
-          ${CLANG} --version
+          echo "=== Clang version ==="
+          ${CLANG} --version || {
+            echo "ERROR: Clang binary not found at ${CLANG}"
+            echo "Trying to find clang..."
+            find ~/toolchains -name clang -type f 2>/dev/null
+            exit 1
+          }
           echo ""
-          echo "=== Checking LLD ==="
-          ${LD_LLD} --version
+          echo "=== LLD version ==="
+          ${LD_LLD} --version || echo "ld.lld not found"
           echo ""
-          echo "=== Checking cross-compile support ==="
+          echo "=== Cross-compile target ==="
           ${CLANG} -print-targets | grep aarch64 || echo "WARNING: aarch64 target not found!"
 
-      # 6. 克隆内核源码
+      # 7. 克隆内核源码
       - name: Clone kernel source
         run: |
           git clone --depth=1 ${KERNEL_REPO} -b ${KERNEL_BRANCH} kernel
           echo "KERNEL_DIR=${GITHUB_WORKSPACE}/kernel" >> $GITHUB_ENV
 
-      # 7. 配置内核
+      # 8. 配置内核
       - name: Configure kernel
         working-directory: kernel
         run: |
@@ -91,7 +163,7 @@ jobs:
             exit 1
           fi
 
-      # 8. 准备模块编译需要的头文件
+      # 9. 准备模块编译需要的头文件
       - name: Prepare kernel headers
         working-directory: kernel
         run: |
@@ -102,7 +174,7 @@ jobs:
             LLVM_IAS=1 \
             modules_prepare
 
-      # 9. 编译内核模块
+      # 10. 编译内核模块
       - name: Build kernel module
         working-directory: ${GITHUB_WORKSPACE}
         run: |
@@ -123,10 +195,10 @@ jobs:
             O=${KERNEL_DIR}/out \
             modules
 
-      # 10. 验证生成的 .ko 文件
+      # 11. 验证生成的 .ko 文件
       - name: Verify .ko output
         run: |
-          echo "=== Checking for .ko files ==="
+          echo "=== Generated .ko files ==="
           KO_FILES=$(find ${GITHUB_WORKSPACE}/${DRIVER_DIR} -name "*.ko" -type f)
           if [ -z "$KO_FILES" ]; then
             echo "ERROR: No .ko files found!"
@@ -137,11 +209,11 @@ jobs:
           echo "=== Module info ==="
           find ${GITHUB_WORKSPACE}/${DRIVER_DIR} -name "*.ko" -exec file {} \;
 
-      # 11. 上传驱动作为构建产物
+      # 12. 上传驱动作为构建产物
       - name: Upload kernel module artifact
         uses: actions/upload-artifact@v4
         with:
-          name: kernel-module
+          name: kernel-module-${CLANG_VERSION}
           path: ${{ env.DRIVER_DIR }}/**/*.ko
           if-no-files-found: error
           retention-days: 90
