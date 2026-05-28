@@ -43,7 +43,7 @@ jobs:
         run: |
           mkdir -p ~/toolchains
           cd ~/toolchains
-          git clone --depth=1 ${CLANG_PREBUILT_URL} -b ${CLANG_VERSION} clang-${CLANG_VERSION}
+          git clone --depth=1 ${CLANG_PREBUILT_URL} -b ${CLANG_VERSION} ${CLANG_VERSION}
 
       # 4. 配置 PATH
       - name: Set up PATH
