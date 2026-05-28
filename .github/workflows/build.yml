@@ -12,15 +12,15 @@ jobs:
     runs-on: ubuntu-22.04
 
     steps:
-    - name: Checkout 你的仓库（包含codex文件夹）
+    - name: Checkout your repository
       uses: actions/checkout@v4
 
-    - name: 克隆小米内核源码
+    - name: Clone Xiaomi kernel source
       run: |
         git clone --depth 1 --branch camellia-r-oss \
           https://github.com/MiCode/Xiaomi_Kernel_OpenSource.git kernel
 
-    - name: 安装Clang/LLVM工具链
+    - name: Install Clang/LLVM toolchain
       run: |
         sudo apt-get update
         sudo apt-get install -y clang-14 lld-14 llvm-14
@@ -32,7 +32,7 @@ jobs:
         sudo ln -sf /usr/bin/llvm-objcopy-14 /usr/bin/llvm-objcopy
         sudo ln -sf /usr/bin/llvm-strip-14 /usr/bin/llvm-strip
 
-    - name: 安装内核编译依赖
+    - name: Install kernel build dependencies
       run: |
         sudo apt-get install -y \
           flex bison libelf-dev libssl-dev \
@@ -41,9 +41,14 @@ jobs:
           device-tree-compiler \
           python3 python3-dev
 
-    - name: 配置内核
+    - name: Configure kernel
       working-directory: ./kernel
       run: |
+        export ARCH=arm64
+        export CC=clang
+        export CLANG_TRIPLE=aarch64-linux-gnu-
+        export CROSS_COMPILE=aarch64-linux-gnu-
+        
         if [ -f arch/arm64/configs/camellia_defconfig ]; then
           make ARCH=arm64 CC=clang CLANG_TRIPLE=aarch64-linux-gnu- \
             CROSS_COMPILE=aarch64-linux-gnu- camellia_defconfig
@@ -51,12 +56,17 @@ jobs:
           make ARCH=arm64 CC=clang CLANG_TRIPLE=aarch64-linux-gnu- \
             CROSS_COMPILE=aarch64-linux-gnu- defconfig
         fi
+        
         scripts/config --enable CONFIG_MODULES
         scripts/config --enable CONFIG_MODULE_UNLOAD
         scripts/config --enable CONFIG_KALLSYMS
         scripts/config --enable CONFIG_KALLSYMS_ALL
+        scripts/config --enable CONFIG_MODVERSIONS
+        
+        make ARCH=arm64 CC=clang CLANG_TRIPLE=aarch64-linux-gnu- \
+          CROSS_COMPILE=aarch64-linux-gnu- olddefconfig
 
-    - name: 准备内核模块构建环境
+    - name: Prepare kernel module build environment
       working-directory: ./kernel
       run: |
         make -j$(nproc) ARCH=arm64 CC=clang \
@@ -65,15 +75,11 @@ jobs:
           LD=ld.lld AR=llvm-ar NM=llvm-nm \
           STRIP=llvm-strip OBJCOPY=llvm-objcopy \
           modules_prepare
-        make -j$(nproc) ARCH=arm64 CC=clang \
-          CLANG_TRIPLE=aarch64-linux-gnu- \
-          CROSS_COMPILE=aarch64-linux-gnu- \
-          Image
 
-    - name: 编译codex驱动模块
+    - name: Compile codex driver module
       working-directory: ./codex
       run: |
-        export KERNELDIR=$(pwd)/../kernel
+        export KERNELDIR=$(realpath ../kernel)
         export ARCH=arm64
         export CC=clang
         export CLANG_TRIPLE=aarch64-linux-gnu-
@@ -83,10 +89,14 @@ jobs:
         export NM=llvm-nm
         export STRIP=llvm-strip
         
+        echo "Current directory: $(pwd)"
+        echo "Kernel directory: $KERNELDIR"
+        ls -la *.c 2>/dev/null || echo "No .c files found"
+        
         if [ ! -f Makefile ]; then
           SOURCES=$(ls *.c 2>/dev/null)
           if [ -z "$SOURCES" ]; then
-            echo "错误: 找不到任何.c源文件"
+            echo "Error: No .c source files found"
             exit 1
           fi
           
@@ -97,23 +107,28 @@ jobs:
             OBJS_LIST="$OBJS_LIST $(basename $src .c).o"
           done
           
-          cat > Makefile << "EOF"
-obj-m := MODULE_NAME_PLACEHOLDER.o
-MODULE_NAME_PLACEHOLDER-objs := OBJS_LIST_PLACEHOLDER
+          cat > Makefile << 'MAKEFILE_END'
+obj-m := MODULE_PLACEHOLDER.o
+MODULE_PLACEHOLDER-objs := OBJS_PLACEHOLDER
 
 KERNELDIR ?= /lib/modules/$(shell uname -r)/build
 PWD := $(shell pwd)
 
 default:
 	$(MAKE) ARCH=$(ARCH) CC=$(CC) CLANG_TRIPLE=$(CLANG_TRIPLE) \
-	         CROSS_COMPILE=$(CROSS_COMPILE) LD=$(LD) AR=$(AR) \
-	         -C $(KERNELDIR) M=$(PWD) modules
+		CROSS_COMPILE=$(CROSS_COMPILE) LD=$(LD) AR=$(AR) \
+		NM=$(NM) STRIP=$(STRIP) \
+		-C $(KERNELDIR) M=$(PWD) modules
 
 clean:
 	$(MAKE) -C $(KERNELDIR) M=$(PWD) clean
-EOF
-          sed -i "s/MODULE_NAME_PLACEHOLDER/$MODULE_NAME/g" Makefile
-          sed -i "s/OBJS_LIST_PLACEHOLDER/$OBJS_LIST/g" Makefile
+MAKEFILE_END
+          
+          sed -i "s/MODULE_PLACEHOLDER/$MODULE_NAME/g" Makefile
+          sed -i "s/OBJS_PLACEHOLDER/$OBJS_LIST/g" Makefile
+          
+          echo "Generated Makefile:"
+          cat Makefile
         fi
         
         make -j$(nproc) KERNELDIR=$KERNELDIR \
@@ -121,24 +136,24 @@ EOF
           CROSS_COMPILE=$CROSS_COMPILE LD=$LD AR=$AR \
           NM=$NM STRIP=$STRIP
         
-        echo "=== 编译完成的KO文件 ==="
-        ls -lh *.ko 2>/dev/null || echo "未找到KO文件"
+        echo "Build results:"
+        ls -lh *.ko 2>/dev/null || echo "No .ko files found"
         
         if ls *.ko 1>/dev/null 2>&1; then
           for ko in *.ko; do
-            echo "--- $ko 信息 ---"
+            echo "Module info for $ko:"
             modinfo $ko 2>/dev/null || true
           done
         fi
 
-    - name: 上传编译好的驱动模块
+    - name: Upload compiled driver modules
       uses: actions/upload-artifact@v4
       with:
         name: xiaomi-kernel-module
         path: codex/*.ko
         if-no-files-found: error
 
-    - name: 上传编译日志
+    - name: Upload build logs
       if: always()
       uses: actions/upload-artifact@v4
       with:
