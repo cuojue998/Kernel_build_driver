@@ -16,8 +16,8 @@ env:
   KERNEL_BRANCH: camellia-r-oss
   DEFCONFIG: camellia_defconfig          # 需确认实际文件名
   ARCH: arm64
-  CLANG_PREBUILT_URL: https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86
-  CLANG_VERSION: llvm-r522817            # 已确认的分支名
+  CLANG_PREBUILT_URL: https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/clang-r530567.tar.gz
+  CLANG_VERSION: clang-r530567
   DRIVER_DIR: codex                      # 驱动源码目录
 
 jobs:
@@ -29,24 +29,27 @@ jobs:
       - name: Checkout driver repo
         uses: actions/checkout@v4
 
-      # 2. 安装构建依赖（增加了 lld 作为备用）
+      # 2. 安装构建依赖
       - name: Install build dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y \
             git make flex bison bc \
             libssl-dev libelf-dev \
-            libncurses-dev python3
+            libncurses-dev python3 wget
 
-      # 3. 下载 Clang 预编译工具链
-      - name: Download AOSP Clang toolchain
+      # 3. 下载并解压 Clang 预编译工具链
+      - name: Download and extract AOSP Clang
         run: |
           mkdir -p ~/toolchains
           cd ~/toolchains
-          git clone --depth=1 ${CLANG_PREBUILT_URL} -b ${CLANG_VERSION}
+          wget -q "${CLANG_PREBUILT_URL}" -O ${CLANG_VERSION}.tar.gz
+          mkdir -p ${CLANG_VERSION}
+          tar -xzf ${CLANG_VERSION}.tar.gz -C ${CLANG_VERSION}
+          rm ${CLANG_VERSION}.tar.gz
           echo "CLANG_DIR=${HOME}/toolchains/${CLANG_VERSION}" >> $GITHUB_ENV
 
-      # 4. 设置工具链路径（仅记录，不依赖 PATH）
+      # 4. 设置工具链路径
       - name: Set toolchain paths
         run: |
           echo "CLANG=${CLANG_DIR}/bin/clang" >> $GITHUB_ENV
@@ -56,7 +59,7 @@ jobs:
           echo "LLVM_STRIP=${CLANG_DIR}/bin/llvm-strip" >> $GITHUB_ENV
           echo "LLVM_OBJCOPY=${CLANG_DIR}/bin/llvm-objcopy" >> $GITHUB_ENV
 
-      # 5. 验证 AOSP Clang 工具链（使用绝对路径）
+      # 5. 验证 Clang 工具链
       - name: Verify AOSP Clang toolchain
         run: |
           echo "=== Checking Clang ==="
@@ -78,7 +81,6 @@ jobs:
       - name: Configure kernel
         working-directory: kernel
         run: |
-          # 尝试多个可能的 defconfig 名称
           if [ -f arch/${ARCH}/configs/${DEFCONFIG} ]; then
             echo "Using defconfig: ${DEFCONFIG}"
             make O=out ARCH=${ARCH} ${DEFCONFIG}
@@ -89,7 +91,7 @@ jobs:
             exit 1
           fi
 
-      # 8. 准备模块编译需要的头文件（使用绝对路径）
+      # 8. 准备模块编译需要的头文件
       - name: Prepare kernel headers
         working-directory: kernel
         run: |
@@ -100,7 +102,7 @@ jobs:
             LLVM_IAS=1 \
             modules_prepare
 
-      # 9. 编译内核模块（全部使用绝对路径）
+      # 9. 编译内核模块
       - name: Build kernel module
         working-directory: ${GITHUB_WORKSPACE}
         run: |
